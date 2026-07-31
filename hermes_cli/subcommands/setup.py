@@ -19,7 +19,7 @@ def build_setup_parser(subparsers, *, cmd_setup: Callable) -> None:
         help="Interactive setup wizard",
         description="Configure Hermes Agent with an interactive wizard. "
         "Run a specific section: "
-        "hermes setup model|tts|terminal|gateway|tools|telemetry|agent",
+        "hermes setup model|tts|terminal|gateway|tools|telemetry|agent|tamu",
     )
     setup_parser.add_argument(
         "section",
@@ -32,6 +32,7 @@ def build_setup_parser(subparsers, *, cmd_setup: Callable) -> None:
             "tools",
             "telemetry",
             "agent",
+            "tamu",
         ],
         default=None,
         help="Run a specific setup section instead of the full wizard",
@@ -63,5 +64,11 @@ def build_setup_parser(subparsers, *, cmd_setup: Callable) -> None:
         help="One-shot Nous Portal setup: log in via OAuth, pick a Nous "
         "model, set Nous as the inference provider, and opt into the Tool "
         "Gateway. Skips the rest of the wizard.",
+    )
+    setup_parser.add_argument(
+        "--tamu",
+        action="store_true",
+        help="One-shot TAMU AI Chat setup. Choose preview or production, "
+        "save the key, discover protected models, and skip the rest of the wizard.",
     )
     setup_parser.set_defaults(func=cmd_setup)

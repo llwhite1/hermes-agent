@@ -438,6 +438,7 @@ from hermes_cli.subcommands.gateway import build_gateway_parser
 from hermes_cli.subcommands.profile import build_profile_parser
 from hermes_cli.subcommands.model import build_model_parser
 from hermes_cli.subcommands.setup import build_setup_parser
+from hermes_cli.subcommands.tamu import build_tamu_parser
 
 from hermes_cli.subcommands.whatsapp import build_whatsapp_parser
 from hermes_cli.subcommands.slack import build_slack_parser
@@ -2978,9 +2979,20 @@ def cmd_whatsapp_cloud(args):
 
 def cmd_setup(args):
     """Interactive setup wizard."""
+    if getattr(args, "tamu", False) or getattr(args, "section", None) == "tamu":
+        args.tamu_command = "setup"
+        return cmd_tamu(args)
+
     from hermes_cli.setup import run_setup_wizard
 
     run_setup_wizard(args)
+
+
+def cmd_tamu(args):
+    """Configure and inspect the TAMU AI Chat integration."""
+    from hermes_cli.tamu import cmd_tamu as _cmd_tamu
+
+    return _cmd_tamu(args)
 
 
 def cmd_model(args):
@@ -10467,7 +10479,7 @@ _BUILTIN_SUBCOMMANDS = frozenset(
         "model", "monitoring", "pairing", "pets", "plugins", "portal", "profile",
         "project", "proxy",
         "prompt-size",
-        "send", "sessions", "setup",
+        "send", "sessions", "setup", "tamu",
         "skin", "skills", "slack", "status", "sync", "tools", "uninstall", "update",
         "version", "webhook", "whatsapp", "whatsapp-cloud", "chat", "secrets", "security",
         # Help-ish invocations — plugin commands not being listed in
@@ -11275,6 +11287,11 @@ def main():
     # setup command  (parser built in hermes_cli/subcommands/setup.py)
     # =========================================================================
     build_setup_parser(subparsers, cmd_setup=cmd_setup)
+
+    # =========================================================================
+    # tamu command — TAMU AI Chat quick setup and local usage
+    # =========================================================================
+    build_tamu_parser(subparsers, cmd_tamu=cmd_tamu)
 
 
     # =========================================================================
