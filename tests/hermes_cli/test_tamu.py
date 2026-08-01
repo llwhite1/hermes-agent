@@ -15,9 +15,13 @@ from hermes_cli.tamu import (
     TamuSetupError,
     enrich_model_contexts,
     fetch_tamu_models,
+    known_context_length,
+    main_agent_models,
     parse_tamu_models,
     persist_tamu_setup,
+    query_tamu_image_usage,
     query_tamu_usage,
+    record_tamu_image_usage,
 )
 
 
@@ -28,11 +32,28 @@ def test_tamu_subcommands_parse_and_dispatch():
     build_tamu_parser(subparsers, cmd_tamu=handler)
 
     setup = parser.parse_args(
-        ["tamu", "setup", "--environment", "preview", "--model", "protected.test"]
+        ["tamu", "setup", "--access", "preview", "--model", "protected.test"]
     )
     assert setup.func is handler
-    assert setup.environment == "preview"
+    assert setup.access == "preview"
     assert setup.model == "protected.test"
+
+    preview_image = parser.parse_args(
+        [
+            "tamu",
+            "setup",
+            "--access",
+            "preview",
+            "--image-model",
+            "protected.gpt-image-2",
+        ]
+    )
+    assert preview_image.image_model == "protected.gpt-image-2"
+
+    refresh = parser.parse_args(
+        ["tamu", "setup", "--access", "preview", "--refresh-context-limits"]
+    )
+    assert refresh.refresh_context_limits is True
 
     usage = parser.parse_args(["tamu", "usage", "--days", "7", "--json"])
     assert usage.days == 7
@@ -117,6 +138,20 @@ def test_enrich_contexts_preserves_existing_operator_value(monkeypatch):
     }
 
 
+def test_tamus_documented_context_overrides_generic_model_metadata():
+    assert known_context_length("protected.Claude Sonnet 4.6") == 200_000
+    assert known_context_length("protected.Laguna-S-2.1") == 1_048_576
+
+
+def test_main_agent_picker_excludes_image_and_embedding_models():
+    models = [
+        {"id": "protected.Claude Sonnet 4.6"},
+        {"id": "protected.gpt-image-2"},
+        {"id": "protected.text-embedding-3-large"},
+    ]
+    assert main_agent_models(models) == [{"id": "protected.Claude Sonnet 4.6"}]
+
+
 def test_persist_tamu_setup_is_additive_and_uses_env_reference(monkeypatch):
     endpoint = TAMU_ENDPOINTS["preview"]
     initial = {
@@ -175,6 +210,77 @@ def test_persist_tamu_setup_is_additive_and_uses_env_reference(monkeypatch):
         "chat-api.preview.tamu.ai",
     ]
     assert report["models_discovered"] == 2
+
+
+def test_persist_preview_image_setup_is_additive(monkeypatch):
+    endpoint = TAMU_ENDPOINTS["preview"]
+    initial = {
+        "image_gen": {"unrelated_option": True},
+        "model": {},
+        "providers": {},
+    }
+    saved = {}
+    monkeypatch.setattr("hermes_cli.config.load_config", lambda: copy.deepcopy(initial))
+    monkeypatch.setattr(
+        "hermes_cli.config.save_config", lambda config: saved.update(copy.deepcopy(config))
+    )
+    monkeypatch.setattr("hermes_cli.config.save_env_value", lambda key, value: None)
+    monkeypatch.setattr("hermes_cli.auth.deactivate_provider", lambda: None)
+
+    models = [
+        {"id": "protected.Claude Sonnet 4.6"},
+        {"id": "protected.gpt-image-2"},
+    ]
+    result = persist_tamu_setup(
+        endpoint,
+        "secret",
+        models,
+        "protected.Claude Sonnet 4.6",
+        image_model="protected.gpt-image-2",
+        max_output_tokens=100_000,
+    )
+
+    assert saved["image_gen"] == {
+        "unrelated_option": True,
+        "provider": "tamu-preview",
+        "model": "protected.gpt-image-2",
+        "use_gateway": False,
+        "tamu_preview": {"model": "protected.gpt-image-2"},
+    }
+    assert saved["model"]["context_length"] == 200_000
+    assert saved["model"]["max_tokens"] == 64_000
+    assert result["output_limit_clamped"] is True
+
+
+def test_refresh_context_limits_replaces_an_older_saved_value(monkeypatch):
+    endpoint = TAMU_ENDPOINTS["preview"]
+    initial = {
+        "model": {},
+        "providers": {
+            "tamu-preview": {
+                "models": {
+                    "protected.Laguna-S-2.1": {"context_length": 1_000_000}
+                }
+            }
+        },
+    }
+    saved = {}
+    monkeypatch.setattr("hermes_cli.config.load_config", lambda: copy.deepcopy(initial))
+    monkeypatch.setattr(
+        "hermes_cli.config.save_config", lambda config: saved.update(copy.deepcopy(config))
+    )
+    monkeypatch.setattr("hermes_cli.config.save_env_value", lambda key, value: None)
+    monkeypatch.setattr("hermes_cli.auth.deactivate_provider", lambda: None)
+
+    persist_tamu_setup(
+        endpoint,
+        "secret",
+        [{"id": "protected.Laguna-S-2.1"}],
+        "protected.Laguna-S-2.1",
+        refresh_context_limits=True,
+    )
+
+    assert saved["model"]["context_length"] == 1_048_576
 
 
 def _usage_connection() -> sqlite3.Connection:
@@ -253,6 +359,35 @@ def test_query_tamu_usage_groups_each_model_and_agent_task():
         "reasoning_tokens": 3,
         "total_tokens": 185,
     }
+
+
+def test_tamu_image_usage_ledger_stores_only_call_metadata(tmp_path):
+    path = tmp_path / "tamu_usage.db"
+    record_tamu_image_usage(
+        model="protected.gpt-image-2",
+        success=True,
+        input_images=1,
+        output_images=1,
+        db_path=path,
+    )
+    record_tamu_image_usage(
+        model="protected.gpt-image-2",
+        success=False,
+        error_type="api error with spaces",
+        db_path=path,
+    )
+
+    rows = query_tamu_image_usage(days=1, db_path=path)
+    assert len(rows) == 1
+    assert rows[0]["api_calls"] == 2
+    assert rows[0]["images_generated"] == 1
+    assert rows[0]["input_images"] == 1
+    assert rows[0]["failed_calls"] == 1
+    columns = {
+        row[1] for row in sqlite3.connect(path).execute("PRAGMA table_info(image_usage)")
+    }
+    assert "prompt" not in columns
+    assert "api_key" not in columns
 
 
 def test_usage_command_is_empty_on_a_new_profile(monkeypatch, tmp_path, capsys):

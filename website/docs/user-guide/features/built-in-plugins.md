@@ -64,6 +64,7 @@ The repo ships these bundled plugins under `plugins/`. All are opt-in — enable
 | `google_meet` | standalone | Join Meet calls, live-caption transcription, optional realtime duplex audio |
 | `image_gen/openai` | image backend | OpenAI `gpt-image-2` image generation backend (alternative to FAL) |
 | `image_gen/openai-codex` | image backend | OpenAI image generation via Codex OAuth |
+| `image_gen/tamu_preview` | image backend | TAMU AI Chat Preview image generation and editing through streaming chat completions |
 | `image_gen/xai` | image backend | xAI `grok-2-image` backend |
 | `hermes-achievements` | dashboard tab | Steam-style collectible badges generated from your real Hermes session history |
 | `kanban/dashboard` | dashboard tab | Kanban board UI for the multi-agent dispatcher — tasks, comments, fan-out, board switching. See [Kanban Multi-Agent](./kanban.md). |

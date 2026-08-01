@@ -1,0 +1,7 @@
+name: tamu-preview
+version: 1.0.0
+description: "TAMU AI Chat Preview image generation through its streaming chat-completions API."
+author: Hermes TAMU integration
+kind: backend
+requires_env:
+  - HERMES_TAMU_PREVIEW_API_KEY

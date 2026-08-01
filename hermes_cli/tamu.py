@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Iterable
 from urllib.parse import urlparse
 
@@ -19,6 +21,8 @@ from urllib.parse import urlparse
 class TamuEndpoint:
     slug: str
     name: str
+    access_label: str
+    access_description: str
     base_url: str
     key_env: str
 
@@ -34,16 +38,132 @@ class TamuEndpoint:
 TAMU_ENDPOINTS: dict[str, TamuEndpoint] = {
     "production": TamuEndpoint(
         slug="production",
-        name="TAMU AI Chat",
+        name="TAMU AI Chat — Standard access",
+        access_label="Standard access",
+        access_description="Normal supported TAMU AI Chat service",
         base_url="https://chat-api.tamu.ai/openai",
         key_env="HERMES_TAMU_PRODUCTION_API_KEY",
     ),
     "preview": TamuEndpoint(
         slug="preview",
-        name="TAMU AI Chat (Preview)",
+        name="TAMU AI Chat — Preview access",
+        access_label="Preview access",
+        access_description="Early-access models and preview-only capabilities",
         base_url="https://chat-api.preview.tamu.ai/openai",
         key_env="HERMES_TAMU_PREVIEW_API_KEY",
     ),
+}
+
+# Current TAMUS documentation is authoritative for TAMUS routes.  These
+# normalized keys intentionally take precedence over Hermes' provider-neutral
+# metadata, which may advertise a different limit for the same model family.
+TAMU_DOCUMENTED_CONTEXT_LENGTHS: dict[str, int] = {
+    "claude-3-5-haiku": 200_000,
+    "claude-opus-4-1": 200_000,
+    "claude-opus-4-5": 200_000,
+    "claude-opus-4-6": 1_000_000,
+    "claude-opus-4-7": 1_000_000,
+    "claude-opus-4-8": 1_000_000,
+    "claude-sonnet-4": 200_000,
+    "claude-sonnet-4-5": 200_000,
+    "claude-sonnet-4-6": 200_000,
+    "claude-haiku-4-5": 200_000,
+    "gemini-2-5-flash": 1_048_576,
+    "gemini-2-5-flash-lite": 1_048_576,
+    "gemini-2-5-pro": 1_048_576,
+    "gemini-3-1-flash-lite": 1_048_576,
+    "gemini-3-5-flash": 1_048_576,
+    "gpt-4-1": 1_047_576,
+    "gpt-4-1-mini": 1_047_576,
+    "gpt-4-1-nano": 1_047_576,
+    "gpt-4o": 128_000,
+    "gpt-5": 400_000,
+    "gpt-5-mini": 400_000,
+    "gpt-5-nano": 400_000,
+    "gpt-5-1": 400_000,
+    "gpt-5-2": 400_000,
+    "gpt-5-4": 1_050_000,
+    "gpt-5-4-mini": 400_000,
+    "gpt-5-4-nano": 400_000,
+    "gpt-5-5": 1_050_000,
+    "o3": 200_000,
+    "o3-mini": 200_000,
+    "o4-mini": 200_000,
+    "devstral-2-123b": 262_144,
+    "gemma-4-31b-it": 262_144,
+    "gpt-oss-120b": 131_072,
+    "laguna-s-2-1": 1_048_576,
+    "gemini-3-1-flash-lite-image": 65_536,
+    "gemini-3-1-flash-image": 131_072,
+}
+
+TAMU_DOCUMENTED_OUTPUT_LIMITS: dict[str, int] = {
+    "claude-3-5-haiku": 8_000,
+    "claude-opus-4-1": 32_000,
+    "claude-opus-4-5": 64_000,
+    "claude-opus-4-6": 128_000,
+    "claude-opus-4-7": 128_000,
+    "claude-opus-4-8": 128_000,
+    "claude-sonnet-4": 64_000,
+    "claude-sonnet-4-5": 64_000,
+    "claude-sonnet-4-6": 64_000,
+    "claude-haiku-4-5": 64_000,
+    "gemini-2-5-flash": 65_535,
+    "gemini-2-5-flash-lite": 65_536,
+    "gemini-2-5-pro": 65_536,
+    "gemini-3-1-flash-lite": 65_536,
+    "gemini-3-5-flash": 65_536,
+    "gpt-4-1": 32_768,
+    "gpt-4-1-mini": 32_768,
+    "gpt-4-1-nano": 32_768,
+    "gpt-4o": 16_384,
+    "gpt-5": 128_000,
+    "gpt-5-mini": 128_000,
+    "gpt-5-nano": 128_000,
+    "gpt-5-1": 128_000,
+    "gpt-5-2": 128_000,
+    "gpt-5-4": 128_000,
+    "gpt-5-4-mini": 128_000,
+    "gpt-5-4-nano": 128_000,
+    "gpt-5-5": 128_000,
+    "o3": 100_000,
+    "o3-mini": 100_000,
+    "o4-mini": 100_000,
+}
+
+# Preview currently exposes image output through the OpenAI-compatible chat
+# completions stream.  Direct /images passthrough is not enabled by TAMUS.
+TAMU_PREVIEW_IMAGE_MODELS: dict[str, dict[str, str]] = {
+    "protected.gemini-3.1-flash-lite-image": {
+        "display": "Gemini 3.1 Flash Lite Image",
+        "speed": "fastest",
+        "strengths": "Low-latency generation and editing",
+        "price": "$0.25 input / $30 output per 1M tokens",
+    },
+    "protected.gemini-3.1-flash-image": {
+        "display": "Gemini 3.1 Flash Image",
+        "speed": "fast",
+        "strengths": "Higher-quality generation and conversational editing",
+        "price": "$0.50 input / $60 output per 1M tokens",
+    },
+    "protected.gpt-image-1-mini": {
+        "display": "GPT Image 1 Mini",
+        "speed": "balanced",
+        "strengths": "Cost-efficient generation and editing",
+        "price": "$2 input / $8 output per 1M tokens",
+    },
+    "protected.gpt-image-1.5": {
+        "display": "GPT Image 1.5",
+        "speed": "balanced",
+        "strengths": "Strong instruction following and visual adherence",
+        "price": "$5 input / $32 output per 1M tokens",
+    },
+    "protected.gpt-image-2": {
+        "display": "GPT Image 2",
+        "speed": "fast",
+        "strengths": "Highest-fidelity generation and editing",
+        "price": "$5 input / $30 output per 1M tokens",
+    },
 }
 
 _CONTEXT_FIELDS = (
@@ -163,8 +283,24 @@ def _normalized_model_name(model: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", bare.lower()).strip("-")
 
 
+def _documented_limit(model: str, limits: dict[str, int]) -> int | None:
+    normalized = _normalized_model_name(model)
+    if normalized in limits:
+        return limits[normalized]
+    # Permit a dated/versioned suffix while preferring the most specific key.
+    matches = [
+        (len(name), value)
+        for name, value in limits.items()
+        if normalized.startswith(f"{name}-")
+    ]
+    return max(matches)[1] if matches else None
+
+
 def known_context_length(model: str) -> int | None:
-    """Return a conservative static Hermes context match, never the fallback."""
+    """Return TAMUS' documented context first, then a generic Hermes match."""
+    documented = _documented_limit(model, TAMU_DOCUMENTED_CONTEXT_LENGTHS)
+    if documented:
+        return documented
     try:
         from agent.model_metadata import DEFAULT_CONTEXT_LENGTHS
     except Exception:
@@ -180,6 +316,35 @@ def known_context_length(model: str) -> int | None:
         return None
     matches.sort(reverse=True)
     return matches[0][1]
+
+
+def known_output_limit(model: str) -> int | None:
+    """Return TAMUS' documented maximum output-token count when available."""
+    return _documented_limit(model, TAMU_DOCUMENTED_OUTPUT_LIMITS)
+
+
+def is_tamu_image_model(model: str) -> bool:
+    return model in TAMU_PREVIEW_IMAGE_MODELS
+
+
+def is_embedding_model(model: str) -> bool:
+    normalized = _normalized_model_name(model)
+    return "embedding" in normalized or normalized.startswith("embed-")
+
+
+def main_agent_models(models: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Exclude output-only image and embedding models from the agent picker."""
+    return [
+        item
+        for item in models
+        if not is_tamu_image_model(_model_id(item))
+        and not is_embedding_model(_model_id(item))
+    ]
+
+
+def preview_image_models(models: Iterable[dict[str, Any]]) -> list[str]:
+    available = {_model_id(item) for item in models}
+    return [model for model in TAMU_PREVIEW_IMAGE_MODELS if model in available]
 
 
 def enrich_model_contexts(
@@ -276,6 +441,8 @@ def persist_tamu_setup(
     *,
     max_output_tokens: int = 32768,
     context_overrides: bool = True,
+    image_model: str | None = None,
+    refresh_context_limits: bool = False,
 ) -> dict[str, Any]:
     """Persist an additive TAMU provider and select it as the default."""
     from hermes_cli.auth import deactivate_provider
@@ -285,14 +452,32 @@ def persist_tamu_setup(
         raise TamuSetupError(
             f"Model {selected_model!r} is not present in the current TAMU catalog."
         )
-    max_output_tokens = _positive_int(max_output_tokens) or 32768
+    requested_output_tokens = _positive_int(max_output_tokens) or 32768
+    documented_output_limit = known_output_limit(selected_model)
+    max_output_tokens = min(
+        requested_output_tokens,
+        documented_output_limit or requested_output_tokens,
+    )
+    if image_model:
+        if endpoint.slug != "preview":
+            raise TamuSetupError(
+                "Preview image models can only be configured with Preview access."
+            )
+        if image_model not in preview_image_models(models):
+            raise TamuSetupError(
+                f"Image model {image_model!r} is not in the current Preview catalog."
+            )
 
     config = load_config()
     prior_entry = _existing_provider_entry(config, endpoint)
     old_models = prior_entry.get("models") if isinstance(prior_entry, dict) else {}
     configured_models = enrich_model_contexts(
         models,
-        existing=old_models if isinstance(old_models, dict) else {},
+        existing=(
+            old_models
+            if isinstance(old_models, dict) and not refresh_context_limits
+            else {}
+        ),
         enabled=context_overrides,
     )
 
@@ -351,6 +536,20 @@ def persist_tamu_setup(
         stream_only.append(endpoint.host)
     auxiliary["stream_only_base_urls"] = stream_only
 
+    if image_model:
+        image_gen = config.get("image_gen")
+        if not isinstance(image_gen, dict):
+            image_gen = {}
+            config["image_gen"] = image_gen
+        image_gen["provider"] = "tamu-preview"
+        image_gen["model"] = image_model
+        image_gen["use_gateway"] = False
+        scoped = image_gen.get("tamu_preview")
+        if not isinstance(scoped, dict):
+            scoped = {}
+            image_gen["tamu_preview"] = scoped
+        scoped["model"] = image_model
+
     save_config(config)
     deactivate_provider()
     return {
@@ -364,6 +563,9 @@ def persist_tamu_setup(
         ),
         "context_length": selected_context,
         "max_output_tokens": max_output_tokens,
+        "requested_output_tokens": requested_output_tokens,
+        "output_limit_clamped": max_output_tokens != requested_output_tokens,
+        "image_model": image_model,
         "key_env": endpoint.key_env,
         "stream_only": True,
     }
@@ -402,11 +604,35 @@ def _prompt_choice(title: str, choices: list[str], default: int = 0) -> int | No
         return selected if 0 <= selected < len(choices) else None
 
 
-def _choose_endpoint(environment: str | None = None) -> TamuEndpoint | None:
+def _prompt_yes_no(prompt: str, *, default: bool = True) -> bool | None:
+    suffix = "[Y/n]" if default else "[y/N]"
+    try:
+        value = input(f"{prompt} {suffix}: ").strip().lower()
+    except (KeyboardInterrupt, EOFError):
+        print()
+        return None
+    if not value:
+        return default
+    if value in {"y", "yes"}:
+        return True
+    if value in {"n", "no"}:
+        return False
+    return None
+
+
+def _choose_endpoint(
+    environment: str | None = None,
+    access: str | None = None,
+) -> TamuEndpoint | None:
+    if access:
+        environment = "production" if access == "standard" else "preview"
     if environment:
         return TAMU_ENDPOINTS[environment]
-    choices = ["Production — chat-api.tamu.ai", "Preview — chat-api.preview.tamu.ai"]
-    selected = _prompt_choice("Choose the TAMU AI Chat endpoint:", choices)
+    choices = [
+        "Standard access — normal supported service",
+        "Preview access — early-access models and capabilities",
+    ]
+    selected = _prompt_choice("Choose your TAMU AI Chat access:", choices)
     if selected is None:
         return None
     return TAMU_ENDPOINTS[("production", "preview")[selected]]
@@ -459,12 +685,16 @@ def run_tamu_setup(args) -> int:
     print("Usage reporting stays in the local Hermes state database.")
     print()
 
-    endpoint = _choose_endpoint(getattr(args, "environment", None))
+    endpoint = _choose_endpoint(
+        getattr(args, "environment", None),
+        getattr(args, "access", None),
+    )
     if endpoint is None:
         print("Setup cancelled.")
         return 1
 
-    print(f"  Endpoint: {endpoint.name}")
+    print(f"  Access:   {endpoint.access_label}")
+    print(f"  Service:  {endpoint.access_description}")
     print(f"  URL:      {endpoint.base_url}")
     print()
     api_key = _prompt_api_key(load_config(), endpoint)
@@ -482,9 +712,19 @@ def run_tamu_setup(args) -> int:
     print()
 
     requested_model = str(getattr(args, "model", "") or "").strip()
-    model_ids = [item["id"] for item in models]
+    agent_models = main_agent_models(models)
+    model_ids = [item["id"] for item in agent_models]
+    if not model_ids:
+        print("  Error: the catalog did not expose a text model usable as an agent.")
+        return 1
     if requested_model:
-        if requested_model not in model_ids:
+        if is_tamu_image_model(requested_model):
+            print(
+                "  Error: image-output models cannot be the Hermes agent model. "
+                "Use --image-model for Preview image generation."
+            )
+            return 1
+        if is_embedding_model(requested_model) or requested_model not in model_ids:
             print(f"  Error: {requested_model!r} is not in the current catalog.")
             return 1
         selected_model = requested_model
@@ -495,6 +735,45 @@ def run_tamu_setup(args) -> int:
             return 1
         selected_model = model_ids[selected]
 
+    requested_image_model = str(
+        getattr(args, "image_model", "") or ""
+    ).strip()
+    image_model: str | None = None
+    available_images = preview_image_models(models)
+    if endpoint.slug != "preview" and requested_image_model:
+        print("  Error: --image-model requires --access preview.")
+        return 1
+    if endpoint.slug == "preview" and requested_image_model:
+        if requested_image_model not in available_images:
+            print(
+                f"  Error: {requested_image_model!r} is not an available "
+                "documented Preview image model."
+            )
+            return 1
+        image_model = requested_image_model
+    elif (
+        endpoint.slug == "preview"
+        and available_images
+        and not getattr(args, "no_image_setup", False)
+    ):
+        print()
+        print(
+            f"  Preview image generation is available ({len(available_images)} model(s))."
+        )
+        configure_images = _prompt_yes_no("  Set up image generation?", default=True)
+        if configure_images:
+            choices = [
+                f"{TAMU_PREVIEW_IMAGE_MODELS[model]['display']} — {model}"
+                for model in available_images
+            ]
+            selected = _prompt_choice(
+                "Choose the Preview image model:", choices, default=0
+            )
+            if selected is None:
+                print("Setup cancelled; no configuration was changed.")
+                return 1
+            image_model = available_images[selected]
+
     try:
         result = persist_tamu_setup(
             endpoint,
@@ -503,6 +782,8 @@ def run_tamu_setup(args) -> int:
             selected_model,
             max_output_tokens=getattr(args, "max_output_tokens", 32768),
             context_overrides=not getattr(args, "no_context_overrides", False),
+            image_model=image_model,
+            refresh_context_limits=getattr(args, "refresh_context_limits", False),
         )
     except TamuSetupError as exc:
         print(f"  Error: {exc}")
@@ -516,7 +797,14 @@ def run_tamu_setup(args) -> int:
     else:
         print("  Context window:      provider/runtime auto-detect")
     print(f"  Response-token cap:  {result['max_output_tokens']:,}")
+    if result["output_limit_clamped"]:
+        print(
+            f"  Note: requested {result['requested_output_tokens']:,}; clamped "
+            "to the TAMUS documented model limit."
+        )
     print(f"  Models saved:        {result['models_discovered']}")
+    if result["image_model"]:
+        print(f"  Preview image model: {result['image_model']}")
     print(f"  Stream compatibility: enabled for {endpoint.host}")
     print()
     print("Next:")
@@ -541,6 +829,17 @@ def tamu_status(*, live_check: bool = False) -> dict[str, Any]:
     if not isinstance(stream_only_values, list):
         stream_only_values = []
     stream_only_hosts = {str(value).lower() for value in stream_only_values}
+    image_gen = config.get("image_gen")
+    image_provider = (
+        str(image_gen.get("provider") or "")
+        if isinstance(image_gen, dict)
+        else ""
+    )
+    image_model = (
+        str(image_gen.get("model") or "")
+        if isinstance(image_gen, dict)
+        else ""
+    )
     rows: list[dict[str, Any]] = []
     for slug, endpoint in TAMU_ENDPOINTS.items():
         entry = _existing_provider_entry(config, endpoint)
@@ -548,6 +847,7 @@ def tamu_status(*, live_check: bool = False) -> dict[str, Any]:
         models = entry.get("models") if isinstance(entry, dict) else {}
         row: dict[str, Any] = {
             "environment": slug,
+            "access": endpoint.access_label,
             "active": active == slug,
             "configured": configured,
             "endpoint": endpoint.base_url,
@@ -560,6 +860,9 @@ def tamu_status(*, live_check: bool = False) -> dict[str, Any]:
             "saved_models": len(models) if isinstance(models, dict) else 0,
             "stream_compatibility": endpoint.host in stream_only_hosts,
         }
+        if slug == "preview":
+            row["image_provider_active"] = image_provider == "tamu-preview"
+            row["image_model"] = image_model if row["image_provider_active"] else ""
         if live_check and row["key_saved"]:
             try:
                 live_models = fetch_tamu_models(
@@ -570,6 +873,10 @@ def tamu_status(*, live_check: bool = False) -> dict[str, Any]:
                 row["default_model_visible"] = row["default_model"] in {
                     item["id"] for item in live_models
                 }
+                if slug == "preview" and row.get("image_model"):
+                    row["image_model_visible"] = row["image_model"] in {
+                        item["id"] for item in live_models
+                    }
             except TamuSetupError as exc:
                 row["live_ok"] = False
                 row["live_error"] = str(exc)
@@ -581,7 +888,7 @@ def _format_status(report: dict[str, Any]) -> str:
     lines = ["TAMU AI Chat status", "=" * 50]
     for row in report["endpoints"]:
         marker = " (active)" if row["active"] else ""
-        lines.append(f"\n{row['environment'].title()}{marker}")
+        lines.append(f"\n{row['access']}{marker}")
         lines.append(f"  Configured:          {'yes' if row['configured'] else 'no'}")
         lines.append(f"  Endpoint:            {row['endpoint']}")
         lines.append(f"  API key saved:       {'yes' if row['key_saved'] else 'no'}")
@@ -591,6 +898,15 @@ def _format_status(report: dict[str, Any]) -> str:
             "  Stream compatibility: "
             + ("enabled" if row["stream_compatibility"] else "not configured")
         )
+        if row["environment"] == "preview":
+            lines.append(
+                "  Preview images:      "
+                + (
+                    row.get("image_model", "")
+                    if row.get("image_provider_active")
+                    else "not configured"
+                )
+            )
         if "live_ok" in row:
             if row["live_ok"]:
                 lines.append(f"  Live check:          ok ({row['live_models']} models)")
@@ -598,9 +914,126 @@ def _format_status(report: dict[str, Any]) -> str:
                     "  Default visible:     "
                     + ("yes" if row["default_model_visible"] else "no")
                 )
+                if "image_model_visible" in row:
+                    lines.append(
+                        "  Image model visible: "
+                        + ("yes" if row["image_model_visible"] else "no")
+                    )
             else:
                 lines.append(f"  Live check:          failed — {row['live_error']}")
     return "\n".join(lines)
+
+
+def tamu_usage_db_path() -> Path:
+    from hermes_constants import get_hermes_home
+
+    return get_hermes_home() / "tamu_usage.db"
+
+
+def record_tamu_image_usage(
+    *,
+    model: str,
+    success: bool,
+    input_images: int = 0,
+    output_images: int = 0,
+    error_type: str = "",
+    db_path: Path | None = None,
+) -> None:
+    """Record a prompt-free, credential-free local Preview image call."""
+    path = Path(db_path) if db_path is not None else tamu_usage_db_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    safe_error_type = re.sub(r"[^a-zA-Z0-9_.-]+", "_", error_type)[:80]
+    try:
+        with sqlite3.connect(path) as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS image_usage (
+                    created_at REAL NOT NULL,
+                    environment TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    api_calls INTEGER NOT NULL,
+                    success INTEGER NOT NULL,
+                    input_images INTEGER NOT NULL,
+                    output_images INTEGER NOT NULL,
+                    error_type TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                "INSERT INTO image_usage VALUES (?, 'preview', ?, 1, ?, ?, ?, ?)",
+                (
+                    time.time(),
+                    model,
+                    int(bool(success)),
+                    max(int(input_images), 0),
+                    max(int(output_images), 0),
+                    safe_error_type,
+                ),
+            )
+    except Exception:
+        # Accounting must never prevent the requested image operation.
+        return
+
+
+def query_tamu_image_usage(
+    *, days: int = 30, db_path: Path | None = None
+) -> list[dict[str, Any]]:
+    """Aggregate local Preview image calls without reading prompts or files."""
+    path = Path(db_path) if db_path is not None else tamu_usage_db_path()
+    if not path.exists():
+        return []
+    cutoff = time.time() - max(int(days), 1) * 86400
+    try:
+        with sqlite3.connect(path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """
+                SELECT environment, model, 'image_generate' AS task,
+                       SUM(api_calls) AS api_calls,
+                       0 AS input_tokens, 0 AS output_tokens,
+                       0 AS cache_read_tokens, 0 AS cache_write_tokens,
+                       0 AS reasoning_tokens, 0 AS sessions,
+                       SUM(api_calls) AS image_calls,
+                       SUM(output_images) AS images_generated,
+                       SUM(input_images) AS input_images,
+                       SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) AS failed_calls,
+                       MAX(created_at) AS last_seen
+                FROM image_usage
+                WHERE created_at >= ?
+                GROUP BY environment, model
+                ORDER BY SUM(api_calls) DESC, model COLLATE NOCASE
+                """,
+                (cutoff,),
+            ).fetchall()
+    except Exception:
+        return []
+    result = [dict(row) for row in rows]
+    for row in result:
+        row["total_tokens"] = 0
+    return result
+
+
+def merge_tamu_image_usage(
+    report: dict[str, Any], image_rows: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Merge non-token image call counts into the regular local report."""
+    report["rows"].extend(image_rows)
+    report["rows"].sort(
+        key=lambda row: (
+            -int(row.get("total_tokens") or 0),
+            -int(row.get("api_calls") or 0),
+            str(row.get("model") or "").casefold(),
+        )
+    )
+    totals = report["totals"]
+    totals["image_calls"] = sum(
+        int(row.get("image_calls") or 0) for row in image_rows
+    )
+    totals["images_generated"] = sum(
+        int(row.get("images_generated") or 0) for row in image_rows
+    )
+    totals["api_calls"] += totals["image_calls"]
+    return report
 
 
 def query_tamu_usage(conn, *, days: int = 30, source: str | None = None) -> dict:
@@ -712,8 +1145,11 @@ def _format_usage(report: dict[str, Any]) -> str:
     if not rows:
         lines.append("No TAMU model usage was recorded in this period.")
         return "\n".join(lines)
-    lines.append(f"{'Environment':<11} {'Model':<38} {'Task':<20} {'Calls':>7} {'Tokens':>13}")
-    lines.append("-" * 96)
+    lines.append(
+        f"{'Environment':<11} {'Model':<38} {'Task':<20} "
+        f"{'Calls':>7} {'Tokens':>13} {'Images':>8}"
+    )
+    lines.append("-" * 105)
     for row in rows:
         model = str(row["model"])
         if len(model) > 38:
@@ -723,7 +1159,8 @@ def _format_usage(report: dict[str, Any]) -> str:
             task = task[:17] + "..."
         lines.append(
             f"{row['environment']:<11} {model:<38} {task:<20} "
-            f"{int(row['api_calls'] or 0):>7,} {int(row['total_tokens'] or 0):>13,}"
+            f"{int(row['api_calls'] or 0):>7,} {int(row['total_tokens'] or 0):>13,} "
+            f"{int(row.get('images_generated') or 0):>8,}"
         )
     totals = report["totals"]
     lines.extend(
@@ -734,6 +1171,13 @@ def _format_usage(report: dict[str, Any]) -> str:
             f"Input: {totals['input_tokens']:,}  Output: {totals['output_tokens']:,}  "
             f"Cache read: {totals['cache_read_tokens']:,}  "
             f"Cache write: {totals['cache_write_tokens']:,}",
+            f"Image calls: {int(totals.get('image_calls') or 0):,}  "
+            f"Images generated: {int(totals.get('images_generated') or 0):,}",
+            *(
+                ["Image calls are not source-attributed and are omitted when --source is used."]
+                if report.get("image_usage_omitted_for_source_filter")
+                else []
+            ),
             "Dollar cost is not estimated because TAMU access is quota-based and "
             "Hermes has no authoritative TAMU price table.",
         ]
@@ -746,7 +1190,7 @@ def cmd_tamu(args) -> int:
     if command in {None, ""}:
         print(
             "usage: hermes tamu <setup|models|status|usage>\n\n"
-            "  setup    Configure preview or production\n"
+            "  setup    Configure Standard or Preview access\n"
             "  models   List protected.* models\n"
             "  status   Check saved configuration\n"
             "  usage    Report local per-model usage"
@@ -783,7 +1227,12 @@ def cmd_tamu(args) -> int:
             for item in models:
                 context = _context_from_catalog_item(item) or known_context_length(item["id"])
                 suffix = f"  ({context:,} context)" if context else ""
-                print(f"  {item['id']}{suffix}")
+                capability = ""
+                if is_tamu_image_model(item["id"]):
+                    capability = "  [image output]"
+                elif is_embedding_model(item["id"]):
+                    capability = "  [embedding]"
+                print(f"  {item['id']}{suffix}{capability}")
         return 0
     if command == "usage":
         from hermes_state import DEFAULT_DB_PATH, SessionDB
@@ -817,6 +1266,13 @@ def cmd_tamu(args) -> int:
                 report = query_tamu_usage(db._conn, days=days, source=source)
             finally:
                 db.close()
+        if source:
+            report["image_usage_omitted_for_source_filter"] = True
+        else:
+            merge_tamu_image_usage(
+                report,
+                query_tamu_image_usage(days=days),
+            )
         print(
             json.dumps(report, indent=2)
             if getattr(args, "json", False)

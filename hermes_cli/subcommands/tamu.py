@@ -21,18 +21,38 @@ def build_tamu_parser(subparsers, *, cmd_tamu: Callable) -> None:
         "setup",
         help="Run the TAMU quick setup wizard",
         description=(
-            "Choose preview or production, securely save the API key, discover "
-            "models, and make one the Hermes default."
+            "Choose Standard or Preview access, securely save the API key, "
+            "discover models, and make one the Hermes default. Preview can "
+            "also configure a documented TAMUS image model."
         ),
     )
-    setup_parser.add_argument(
+    access_group = setup_parser.add_mutually_exclusive_group()
+    access_group.add_argument(
+        "--access",
+        choices=["standard", "preview"],
+        help="User-facing access track: standard or preview (prompted when omitted)",
+    )
+    access_group.add_argument(
         "--environment",
         choices=["production", "preview"],
-        help="TAMU endpoint to configure (prompted when omitted)",
+        help=(
+            "Endpoint name retained for scripting compatibility; prefer "
+            "--access standard|preview"
+        ),
     )
     setup_parser.add_argument(
         "--model",
         help="Model id to select after discovery (otherwise show a searchable picker)",
+    )
+    image_group = setup_parser.add_mutually_exclusive_group()
+    image_group.add_argument(
+        "--image-model",
+        help="Preview image model id to configure for image_generate",
+    )
+    image_group.add_argument(
+        "--no-image-setup",
+        action="store_true",
+        help="Skip Preview image-generation setup without prompting",
     )
     setup_parser.add_argument(
         "--max-output-tokens",
@@ -45,6 +65,14 @@ def build_tamu_parser(subparsers, *, cmd_tamu: Callable) -> None:
         "--no-context-overrides",
         action="store_true",
         help="Do not save context-window metadata known to Hermes",
+    )
+    setup_parser.add_argument(
+        "--refresh-context-limits",
+        action="store_true",
+        help=(
+            "Replace previously saved context values with current catalog or "
+            "TAMUS-documented limits"
+        ),
     )
 
     models_parser = tamu_subparsers.add_parser(
